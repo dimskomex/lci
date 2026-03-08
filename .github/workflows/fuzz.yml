@@ -1,0 +1,66 @@
+name: AFL++ Fuzzing Pipeline
+
+on: [push]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-fuzz:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Run Fuzzer (5 Minutes)
+        run: |
+          mkdir -p out
+          IMAGE_PATH=$(echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          timeout 6m docker run --rm -v ${{ github.workspace }}/out:/src/fuzz/out $IMAGE_PATH:latest || true
+
+      - name: Fix Permissions and Rename Results
+        if: always()
+        run: |
+          # 1. Take ownership of the files
+          sudo chown -R $USER:$USER ${{ github.workspace }}/out
+          
+          # 2. Recursively find files with colons and rename them
+          # This replaces ":" with "_" so GitHub Artifacts won't complain
+          find ${{ github.workspace }}/out -name "*:*" -exec bash -c 'mv "$1" "${1//:/_}"' -- {} \;
+
+      - name: Upload Fuzzing Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lci-fuzz-results
+          path: out/
